@@ -15,14 +15,20 @@ from datetime import datetime
 class ContractObfuscator:
     def __init__(self):
         self.salt = os.urandom(16)
+        # Enhanced patterns to catch more variables and functions
         self.common_patterns = {
-            r'function\s+(\w+)': 'function',
-            r'contract\s+(\w+)': 'contract',
-            r'event\s+(\w+)': 'event',
-            r'modifier\s+(\w+)': 'modifier',
-            r'(\w+)\s*$$[^)]*$$\s*{': 'function_call',
-            r'address\s+(\w+)': 'address_var'
+            r'\bfunction\s+(\w+)': 'function',
+            r'\bcontract\s+(\w+)': 'contract',
+            r'\bevent\s+(\w+)': 'event',
+            r'\bmodifier\s+(\w+)': 'modifier',
+            r'\buint256\s+(?:private|public|internal)?\s*(\w+)': 'uint_var',
+            r'\baddress\s+(?:private|public|internal)?\s*(\w+)': 'address_var',
+            r'\bbool\s+(?:private|public|internal)?\s*(\w+)': 'bool_var',
+            r'\bstring\s+(?:private|public|internal)?\s*(\w+)': 'string_var',
+            r'\bmapping\s*$$.*$$\s*(?:private|public|internal)?\s*(\w+)': 'mapping_var',
+            r'\b(\w+)\s*$$[^)]*$$\s*{': 'function_call',
         }
+
 
     def generate_secure_key(self) -> bytes:
         """Generate a more secure key using additional entropy"""
@@ -61,24 +67,90 @@ class ContractObfuscator:
             elements.update(match.group(1) for match in matches if match.group(1))
         return elements
 
+    def generate_opaque_predicate(self) -> str:
+        """Generate mathematically complex but always true/false conditions"""
+        predicates = [
+            f"(x * x - {random.randint(1, 100)} * x + {random.randint(1, 100)}) % 2 == 0",
+            f"(x & (x - 1)) == 0",
+            f"(x | {random.randint(1, 100)}) >= x",
+            f"(x ^ (x >> 1)) != 0",
+        ]
+        return random.choice(predicates)
+
+    def generate_dead_code(self) -> str:
+        """Generate dead code that won't affect the contract's functionality"""
+        dead_code_templates = [
+            """
+            function {func_name}() private pure {{
+                uint256 x = {num1};
+                if ({predicate}) {{
+                    x = {num2};
+                }}
+                assembly {{
+                    // Some assembly operations that don't affect state
+                    let y := mul(x, {num3})
+                    y := add(y, {num4})
+                }}
+            }}
+            """,
+            """
+            function {func_name}() private view returns (bool) {{
+                uint256 x = block.timestamp % {num1};
+                return x > 0 && {predicate};
+            }}
+            """,
+        ]
+
+        template = random.choice(dead_code_templates)
+        return template.format(
+            func_name=self.generate_obfuscated_name(8),
+            num1=random.randint(1, 1000),
+            num2=random.randint(1, 1000),
+            num3=random.randint(1, 1000),
+            num4=random.randint(1, 1000),
+            predicate=self.generate_opaque_predicate()
+        )
+
+    def insert_opaque_predicates(self, code: str) -> str:
+        """Insert opaque predicates into the code"""
+        # Find function bodies
+        function_pattern = r'(function\s+\w+\s*$$[^)]*$$\s*{[^}]*})'
+        functions = re.finditer(function_pattern, code)
+
+        modified_code = code
+        for match in functions:
+            function_body = match.group(1)
+            # Insert opaque predicate
+            predicate = self.generate_opaque_predicate()
+            modified_function = function_body.replace(
+                '{',
+                f'{{\n        uint256 x = uint256(block.timestamp);\n        require({predicate}, "Invalid state");\n',
+                1
+            )
+            modified_code = modified_code.replace(function_body, modified_function)
+
+        return modified_code
+
     def obfuscate_names(self, contract_code: str) -> Tuple[str, Dict[str, str]]:
-        """Enhanced name obfuscation with smart contract awareness"""
+        """Enhanced name obfuscation with better variable detection"""
         obfuscation_map = {}
         obfuscated_code = contract_code
 
-        # Identify and obfuscate smart contract elements
-        elements_to_obfuscate = self.identify_smart_contract_elements(contract_code)
-
-        for element in elements_to_obfuscate:
-            if element not in obfuscation_map:
-                obfuscated_name = self.generate_obfuscated_name()
-                while obfuscated_name in obfuscation_map.values():
+        # First pass: identify all elements to obfuscate
+        for pattern, _ in self.common_patterns.items():
+            matches = re.finditer(pattern, contract_code)
+            for match in matches:
+                original_name = match.group(1)
+                if original_name not in obfuscation_map and not original_name.startswith('_'):
                     obfuscated_name = self.generate_obfuscated_name()
-                obfuscation_map[element] = obfuscated_name
+                    while obfuscated_name in obfuscation_map.values():
+                        obfuscated_name = self.generate_obfuscated_name()
+                    obfuscation_map[original_name] = obfuscated_name
 
         # Sort by length (longest first) to prevent partial replacements
         sorted_elements = sorted(obfuscation_map.items(), key=lambda x: len(x[0]), reverse=True)
 
+        # Second pass: replace all occurrences
         for original, obfuscated in sorted_elements:
             pattern = r'\b' + re.escape(original) + r'\b'
             obfuscated_code = re.sub(pattern, obfuscated, obfuscated_code)
@@ -86,15 +158,19 @@ class ContractObfuscator:
         return obfuscated_code, obfuscation_map
 
     def control_flow_obfuscation(self, contract_code: str) -> str:
-        """Enhanced control flow obfuscation"""
-        # Add dummy functions at the end of the contract
-        contract_parts = contract_code.rsplit('}', 1)
-        if len(contract_parts) == 2:
-            dummy_functions = [
-                f"\n    function {self.generate_obfuscated_name()}() private {{ }}\n"
-            ]
-            return contract_parts[0] + '\n'.join(dummy_functions) + '}'
-        return contract_code
+        """Enhanced control flow obfuscation with dead code and opaque predicates"""
+        # First, add opaque predicates
+        obfuscated_code = self.insert_opaque_predicates(contract_code)
+
+        # Add dead code before the final closing brace
+        dead_code_count = random.randint(3, 7)
+        dead_code = '\n'.join(self.generate_dead_code() for _ in range(dead_code_count))
+
+        # Insert dead code before the last closing brace
+        if obfuscated_code.rstrip().endswith('}'):
+            obfuscated_code = obfuscated_code.rstrip()[:-1] + '\n' + dead_code + '\n}'
+
+        return obfuscated_code
 
 
 class ObfuscatorGUI:
@@ -207,10 +283,42 @@ class ObfuscatorGUI:
             # Get the obfuscated code from the text area
             obfuscated_code = self.text_area.get("1.0", tk.END).strip()
 
-            # Reverse the obfuscation
-            deobfuscated_code = obfuscated_code
+            # Remove dead code functions (identified by obfuscated names)
+            code_lines = obfuscated_code.split('\n')
+            cleaned_lines = []
+            skip_function = False
+
+            for line in code_lines:
+                # Check if line contains a dead code function
+                if any(obfuscated in line for obfuscated in obfuscation_map.values()):
+                    if 'function' in line and '{' in line and '}' in line:
+                        continue
+                    elif 'function' in line and '{' in line:
+                        skip_function = True
+                        continue
+
+                if skip_function:
+                    if '}' in line:
+                        skip_function = False
+                    continue
+
+                cleaned_lines.append(line)
+
+            deobfuscated_code = '\n'.join(cleaned_lines)
+
+            # Reverse the name obfuscation
             for original, obfuscated in obfuscation_map.items():
                 deobfuscated_code = deobfuscated_code.replace(obfuscated, original)
+
+            # Remove opaque predicates
+            deobfuscated_code = re.sub(
+                r'uint256 x = uint256$$block\.timestamp$$;[\s\n]*require$$[^;]+;',
+                '',
+                deobfuscated_code
+            )
+
+            # Clean up any remaining artifacts
+            deobfuscated_code = re.sub(r'\n\s*\n\s*\n', '\n\n', deobfuscated_code)
 
             # Clear the text area and insert the deobfuscated code
             self.text_area.delete(1.0, tk.END)
